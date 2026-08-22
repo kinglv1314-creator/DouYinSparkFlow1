@@ -276,6 +276,7 @@ def scroll_and_select_user(page, username, targets):
 def do_user_task(browser, account_name, cookies, targets):
     """Run one account and return the friends that received a message."""
     context = browser.new_context()  # 每个任务使用独立的上下文
+    page = None
     sent_targets = []
     try:
         context.set_default_navigation_timeout(config["browserTimeout"])  # 设置导航超时时间为 120 秒
@@ -375,6 +376,11 @@ def do_user_task(browser, account_name, cookies, targets):
         if not sent_targets:
             raise RuntimeError("没有找到可发送消息的目标好友，请检查昵称/抖音号和 Cookies")
         return sent_targets
+    except Exception as exc:
+        # Selector failures often mean a login/verification/interstitial page was loaded.
+        if page is not None:
+            save_page_diagnostics(page, account_name, "friend-list", str(exc))
+        raise
     finally:
         context.close()
 
