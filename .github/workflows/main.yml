@@ -1,0 +1,46 @@
+name: DouYin Spark Flow Schedule Run
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 19 * * *"
+
+jobs:
+  run-main:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    environment: user-data
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: DouYinSparkFlow-cloud-auto-renew-v2
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install browser
+        run: playwright install chromium --with-deps --only-shell
+
+      - name: Export configuration
+        working-directory: DouYinSparkFlow-cloud-auto-renew-v2
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          SECRETS_JSON: ${{ toJson(secrets) }}
+        run: python utils/export_github_env.py
+
+      - name: Run DouYin Spark Flow
+        working-directory: DouYinSparkFlow-cloud-auto-renew-v2
+        run: python main.py
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: run-logs
+          path: DouYinSparkFlow-cloud-auto-renew-v2/logs/
