@@ -73,10 +73,47 @@ def sanitize_cookies(cookies):
     if not isinstance(cookies, list) or not all(isinstance(cookie, dict) for cookie in cookies):
         raise ValueError("Cookies 必须是 Cookie 对象组成的 JSON 数组")
 
-    for cookie in cookies:
-        if "sameSite" in cookie:
-            cookie.pop("sameSite")  # 移除 sameSite 字段，Playwright 可能不支持该字段
-    return cookies
+    allowed_fields = {
+        "name",
+        "value",
+        "url",
+        "domain",
+        "path",
+        "expires",
+        "httpOnly",
+        "secure",
+        "sameSite",
+    }
+    sanitized = []
+    for original in cookies:
+        cookie = dict(original)
+        if "expirationDate" in cookie and "expires" not in cookie:
+            cookie["expires"] = cookie["expirationDate"]
+
+        same_site = str(cookie.get("sameSite", "")).lower()
+        same_site_map = {
+            "lax": "Lax",
+            "strict": "Strict",
+            "none": "None",
+            "no_restriction": "None",
+        }
+        if same_site in same_site_map:
+            cookie["sameSite"] = same_site_map[same_site]
+        else:
+            cookie.pop("sameSite", None)
+
+        cookie = {key: value for key, value in cookie.items() if key in allowed_fields}
+        if not cookie.get("name") or "value" not in cookie:
+            continue
+        if not cookie.get("url") and not cookie.get("domain"):
+            continue
+        if cookie.get("domain") and not cookie.get("path"):
+            cookie["path"] = "/"
+        sanitized.append(cookie)
+
+    if not sanitized:
+        raise ValueError("Cookies 中没有 Playwright 可用的条目")
+    return sanitized
 
 
 def get_userData():
