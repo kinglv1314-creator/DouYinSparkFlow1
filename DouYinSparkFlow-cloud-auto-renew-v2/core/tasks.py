@@ -1,4 +1,7 @@
 import traceback
+import os
+import re
+from urllib.parse import urlsplit
 from utils.logger import setup_logger
 from utils.config import get_config, get_userData
 from core.msg_builder import build_message, build_message_with_openai
@@ -15,6 +18,62 @@ userData = get_userData()
 logger = setup_logger(level=config.get("logLevel", "Info"))
 matchMode = config.get("matchMode", "nickname")
 userIDDict = {}
+
+
+def _safe_name(value):
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", str(value))[:80] or "account"
+
+
+def save_page_diagnostics(page, account_name, target_name, reason):
+    """Save non-secret page diagnostics for GitHub Actions failures."""
+    os.makedirs("logs", exist_ok=True)
+    prefix = f"logs/{_safe_name(account_name)}-{_safe_name(target_name)}"
+    try:
+        page.screenshot(path=f"{prefix}-failure.png", full_page=True)
+    except Exception as exc:
+        logger.warning(f"保存页面截图失败：{exc}")
+    logger.error(
+        f"发送诊断：原因={reason}，URL={page.url}，标题={page.title()}"
+    )
+
+
+def _editable_text(locator):
+    try:
+        return locator.evaluate(
+            """(element) => (element.innerText || element.textContent || element.value || '').trim()"""
+        )
+    except Exception:
+        return ""
+
+
+def confirm_message_send(page, chat_input, before_message_count, response_events):
+    """Wait for an accepted send response or a visible UI state change."""
+    deadline = time.monotonic() + config["sendConfirmTimeout"] / 1000
+    while time.monotonic() < deadline:
+        if any(event["ok"] for event in response_events):
+            return "send API returned success"
+
+        input_text = _editable_text(chat_input)
+        if not input_text:
+            return "chat input cleared after send"
+
+        for selector in (
+            '[class*="message-item"]',
+            '[class*="message-content"]',
+            '[class*="chat-message"]',
+        ):
+            try:
+                if page.locator(selector).count() > before_message_count:
+                    return f"message list changed ({selector})"
+            except Exception:
+                continue
+        time.sleep(0.25)
+
+    failed_responses = [event for event in response_events if not event["ok"]]
+    if failed_responses:
+        statuses = ", ".join(str(event["status"]) for event in failed_responses)
+        raise RuntimeError(f"抖音发送接口返回失败状态：{statuses}")
+    raise RuntimeError("按键后未检测到发送接口成功响应、输入框清空或新消息气泡")
 
 def handle_response(response: Response):
     """
@@ -247,6 +306,12 @@ def do_user_task(browser, account_name, cookies, targets):
             url="https://creator.douyin.com/creator-micro/data/following/chat",
         )
 
+        page.wait_for_load_state("domcontentloaded")
+        current_url = page.url.lower()
+        if any(marker in current_url for marker in ("login", "passport", "captcha", "verify", "challenge")):
+            save_page_diagnostics(page, account_name, "login", "Cookies 未登录或页面触发验证")
+            raise RuntimeError("未进入抖音消息页，当前 Cookies 可能失效或云端 IP 触发验证")
+
         logger.debug(f"账号 {account_name} 开始发送消息")
         # 滚动并选择用户
         for target_name in scroll_and_select_user(page, account_name, targets):
@@ -255,23 +320,58 @@ def do_user_task(browser, account_name, cookies, targets):
             chat_input_selector = "xpath=//div[contains(@class, 'chat-input-')]"
             page.wait_for_selector(chat_input_selector, timeout=config["browserTimeout"])
             chat_input = page.locator(chat_input_selector)
+            chat_input.click()
 
-            # 在 chat-input-dccKiL 中输入内容
-            message = build_message()
-            for line in message.split("\\n"):
+            message = build_message().replace("\\n", "\n").strip()
+            before_message_count = 0
+            for selector in (
+                '[class*="message-item"]',
+                '[class*="message-content"]',
+                '[class*="chat-message"]',
+            ):
+                try:
+                    before_message_count = max(before_message_count, page.locator(selector).count())
+                except Exception:
+                    pass
+
+            for line_index, line in enumerate(message.splitlines() or [message]):
                 chat_input.type(line)  # 输入每一行
-                # 如果不是最后一行，模拟 Shift+Enter 插入换行
-                if line != message.split("\\n")[-1]:
+                if line_index < len(message.splitlines()) - 1:
                     chat_input.press("Shift+Enter")  # 模拟 Shift+Enter 插入换行
 
             logger.debug(
                 f"账号 {account_name} 准备发送消息给好友 {target_name}：\n\t{message}"
             )
-            # 模拟按下回车键发送消息
+            response_events = []
+
+            def on_send_response(response):
+                url = response.url.lower()
+                if any(marker in url for marker in ("send_message", "send_msg", "message/send", "/im/send")):
+                    response_events.append(
+                        {
+                            "ok": 200 <= response.status < 300,
+                            "status": response.status,
+                            "path": urlsplit(response.url).path,
+                        }
+                    )
+
+            page.on("response", on_send_response)
             chat_input.press("Enter")
+            try:
+                confirmation = confirm_message_send(
+                    page, chat_input, before_message_count, response_events
+                )
+            except Exception as exc:
+                save_page_diagnostics(page, account_name, target_name, str(exc))
+                raise
+            finally:
+                page.remove_listener("response", on_send_response)
+
             sent_targets.append(target_name)
-            logger.info(f"账号 {account_name} 已向好友 {target_name} 发送续火花消息")
-            time.sleep(2)  # 发送完等待一会儿
+            logger.info(
+                f"账号 {account_name} 已向好友 {target_name} 发送续火花消息，确认方式：{confirmation}"
+            )
+            time.sleep(1)
         if not sent_targets:
             raise RuntimeError("没有找到可发送消息的目标好友，请检查昵称/抖音号和 Cookies")
         return sent_targets
