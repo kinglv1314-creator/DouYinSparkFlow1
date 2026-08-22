@@ -46,6 +46,22 @@ def _editable_text(locator):
         return ""
 
 
+def assert_creator_login(page, account_name):
+    """Fail quickly when the creator login screen is shown."""
+    body_text = ""
+    try:
+        body_text = page.locator("body").inner_text(timeout=10000)
+    except Exception:
+        pass
+    login_markers = ("扫码登录", "验证码登录", "密码登录", "我是创作者")
+    if sum(marker in body_text for marker in login_markers) >= 2:
+        save_page_diagnostics(page, account_name, "login", "Cookie 未恢复登录状态")
+        raise RuntimeError(
+            "当前 Cookies 在 GitHub 云端未恢复登录状态；请重新导出创作者中心 Cookies，"
+            "若仍出现登录页则说明抖音拒绝了 GitHub Runner 的异地会话"
+        )
+
+
 def confirm_message_send(page, chat_input, before_message_count, response_events):
     """Wait for an accepted send response or a visible UI state change."""
     deadline = time.monotonic() + config["sendConfirmTimeout"] / 1000
@@ -287,18 +303,10 @@ def do_user_task(browser, account_name, cookies, targets):
         if matchMode == "short_id":  # 使用抖音号进行匹配
             page.on("response", handle_response)
         
-        # 打开抖音创作者中心
-        retry_operation(
-            "打开抖音创作者中心",
-            page.goto,
-            retries=config["taskRetryTimes"],
-            delay=5,
-            url="https://creator.douyin.com/",
-        )
-        # 注入 Cookie
+        # 导航前注入 Cookie，避免先产生匿名会话再覆盖登录态。
         context.add_cookies(cookies)
 
-        # 导航到消息页面
+        # 直接导航到消息页面
         retry_operation(
             "导航到消息页面",
             page.goto,
@@ -308,6 +316,7 @@ def do_user_task(browser, account_name, cookies, targets):
         )
 
         page.wait_for_load_state("domcontentloaded")
+        assert_creator_login(page, account_name)
         current_url = page.url.lower()
         if any(marker in current_url for marker in ("login", "passport", "captcha", "verify", "challenge")):
             save_page_diagnostics(page, account_name, "login", "Cookies 未登录或页面触发验证")
